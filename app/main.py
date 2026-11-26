@@ -9,17 +9,23 @@ from typing import Optional
 from fastapi import APIRouter, Depends, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
-from . import services
+from . import services, training
 from .db import connect, init_db
 from .models import (
     ConfirmRevocationIn,
     DefinitionIn,
+    EnrollmentIn,
     IssueIn,
     RecordIn,
     ReviewIn,
     RevocationIn,
     SchoolIn,
     StudentIn,
+    SwapOrderIn,
+    SwapResponseIn,
+    TrainingClassIn,
+    TrainingTermIn,
+    WithdrawalIn,
 )
 from .services import ServiceError
 
@@ -201,6 +207,91 @@ def create_app(db_path: Optional[str] = None) -> FastAPI:
         )
 
     app.include_router(router)
+
+    # ----- advanced practical training ------------------------------------
+    training_router = APIRouter(prefix="/api/training", tags=["training"])
+
+    @training_router.post("/terms", status_code=201)
+    def create_term(payload: TrainingTermIn, conn: sqlite3.Connection = DbConn):
+        return training.create_term(conn, payload)
+
+    @training_router.get("/terms")
+    def list_terms(conn: sqlite3.Connection = DbConn):
+        return training.list_terms(conn)
+
+    @training_router.get("/terms/{term_id}")
+    def get_term(term_id: str, conn: sqlite3.Connection = DbConn):
+        return training.get_term(conn, term_id)
+
+    @training_router.post("/classes", status_code=201)
+    def create_class(payload: TrainingClassIn, conn: sqlite3.Connection = DbConn):
+        return training.create_class(conn, payload)
+
+    @training_router.get("/terms/{term_id}/classes")
+    def list_classes(term_id: str, conn: sqlite3.Connection = DbConn):
+        return training.list_classes(conn, term_id)
+
+    @training_router.get("/terms/{term_id}/classes/{class_id}/roster")
+    def get_class_roster(
+        term_id: str,
+        class_id: str,
+        organizer_school_id: str = Query(
+            ..., description="the organizing school's local school_id"
+        ),
+        conn: sqlite3.Connection = DbConn,
+    ):
+        return training.get_class_roster(conn, term_id, class_id, organizer_school_id)
+
+    @training_router.post("/enrollments", status_code=201)
+    def enroll(payload: EnrollmentIn, conn: sqlite3.Connection = DbConn):
+        return training.enroll(conn, payload)
+
+    @training_router.post("/withdrawals")
+    def withdraw(payload: WithdrawalIn, conn: sqlite3.Connection = DbConn):
+        return training.withdraw(conn, payload.term_id, payload.student_id)
+
+    @training_router.get("/terms/{term_id}/students/{student_id}")
+    def get_student_term_view(
+        term_id: str, student_id: str, conn: sqlite3.Connection = DbConn
+    ):
+        return training.get_student_term_view(conn, term_id, student_id)
+
+    @training_router.post("/swap-orders", status_code=201)
+    def create_swap_order(payload: SwapOrderIn, conn: sqlite3.Connection = DbConn):
+        return training.create_swap_order(conn, payload)
+
+    @training_router.get("/swap-orders")
+    def list_swap_orders(
+        term_id: Optional[str] = None,
+        status: Optional[str] = Query(
+            default=None,
+            description=(
+                "pending_confirmation | swapped | rejected | withdrawn | "
+                "disqualified | expired"
+            ),
+        ),
+        conn: sqlite3.Connection = DbConn,
+    ):
+        return training.list_swap_orders(conn, term_id=term_id, status=status)
+
+    @training_router.get("/swap-orders/{order_id}")
+    def get_swap_order(order_id: str, conn: sqlite3.Connection = DbConn):
+        return training.get_swap_order(conn, order_id)
+
+    @training_router.post("/swap-orders/{order_id}/responses")
+    def respond_swap(
+        order_id: str,
+        payload: SwapResponseIn,
+        conn: sqlite3.Connection = DbConn,
+    ):
+        return training.respond_swap(
+            conn,
+            order_id=order_id,
+            student_id=payload.student_id,
+            response=payload.response,
+        )
+
+    app.include_router(training_router)
 
     # Public verification is intentionally not under an administrative noun.
     @app.get("/verify/{certificate_code}", tags=["verification"])

@@ -1119,8 +1119,32 @@ def revoke_record(
                     """,
                     (STATUS_PENDING, ts_pending, STATUS_ACTIVE, *newly_pending),
                 )
+
+            # Training enrollment hook: any certificate whose (still-held)
+            # basis includes this record is no longer valid, so enrollments
+            # using it stop holding seats immediately -- without waiting for
+            # the issuing school's revocation confirmation. The existing
+            # certificate occupancy rules above are unchanged.
+            affected_cert_rows = conn.execute(
+                """
+                SELECT DISTINCT certificate_code
+                FROM certificate_item_record
+                WHERE record_code = ? AND released_at IS NULL
+                """,
+                (record_code,),
+            ).fetchall()
+            affected_cert_codes = [row["certificate_code"] for row in affected_cert_rows]
+            from .training import invalidate_enrollments_for_certificates
+
+            training_effect = invalidate_enrollments_for_certificates(
+                conn, affected_cert_codes
+            )
         else:
             newly_pending = []
+            training_effect = {
+                "disqualified_enrollment_ids": [],
+                "ended_swap_order_ids": [],
+            }
 
         related_rows = conn.execute(
             """
@@ -1140,6 +1164,7 @@ def revoke_record(
         "already_revoked": already_revoked,
         "newly_pending_certificate_codes": newly_pending,
         "related_certificates": related,
+        "training_effect": training_effect,
         "rule": "affected active certificates become revocation_pending immediately; their other records stay held until issuer confirmation.",
     }
 

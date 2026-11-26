@@ -132,6 +132,107 @@ WHERE released_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_item_record_record
 ON certificate_item_record(record_code);
+
+-- ---------------------------------------------------------------------------
+-- Advanced practical training: terms, classes, enrollments and joint swaps
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS training_term (
+    term_id                 TEXT PRIMARY KEY,
+    organizer_school_id     TEXT NOT NULL REFERENCES school(school_id),
+    title                   TEXT NOT NULL,
+    created_at              TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS term_accepted_credential (
+    term_id                 TEXT NOT NULL REFERENCES training_term(term_id),
+    definition_id           TEXT NOT NULL REFERENCES credential_definition(definition_id),
+    created_at              TEXT NOT NULL,
+    PRIMARY KEY (term_id, definition_id)
+);
+
+CREATE TABLE IF NOT EXISTS training_class (
+    class_id                TEXT PRIMARY KEY,
+    term_id                 TEXT NOT NULL REFERENCES training_term(term_id),
+    name                    TEXT NOT NULL,
+    capacity                INTEGER NOT NULL CHECK (capacity >= 0),
+    created_at              TEXT NOT NULL,
+    UNIQUE (term_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_class_term
+ON training_class(term_id);
+
+CREATE TABLE IF NOT EXISTS enrollment (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    term_id                 TEXT NOT NULL REFERENCES training_term(term_id),
+    student_id              TEXT NOT NULL REFERENCES student(student_id),
+    class_id                TEXT NOT NULL REFERENCES training_class(class_id),
+    certificate_code        TEXT NOT NULL REFERENCES certificate(certificate_code),
+    definition_id           TEXT NOT NULL REFERENCES credential_definition(definition_id),
+    status                  TEXT NOT NULL CHECK (
+                                status IN ('enrolled', 'withdrawn', 'disqualified')
+                            ),
+    enrolled_at             TEXT NOT NULL,
+    ended_at                TEXT
+);
+
+-- A student holds at most one formal seat per term. Withdrawn/disqualified
+-- rows remain as history but no longer participate in this unique constraint.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_active_enrollment
+ON enrollment(term_id, student_id)
+WHERE status = 'enrolled';
+
+CREATE INDEX IF NOT EXISTS idx_enrollment_active_class
+ON enrollment(class_id)
+WHERE status = 'enrolled';
+
+CREATE TABLE IF NOT EXISTS swap_order (
+    order_id                TEXT PRIMARY KEY,
+    term_id                 TEXT NOT NULL REFERENCES training_term(term_id),
+    organizer_school_id     TEXT NOT NULL REFERENCES school(school_id),
+    status                  TEXT NOT NULL CHECK (
+                                status IN (
+                                    'pending_confirmation',
+                                    'swapped',
+                                    'rejected',
+                                    'withdrawn',
+                                    'disqualified',
+                                    'expired'
+                                )
+                            ),
+    confirm_deadline        TEXT NOT NULL,
+    created_at              TEXT NOT NULL,
+    completed_at            TEXT,
+    end_reason              TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_swap_order_term_status
+ON swap_order(term_id, status);
+
+CREATE TABLE IF NOT EXISTS swap_participant (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id                TEXT NOT NULL REFERENCES swap_order(order_id),
+    student_id              TEXT NOT NULL,
+    from_class_id           TEXT NOT NULL,
+    to_class_id             TEXT NOT NULL,
+    -- NULL means the student has not responded yet.
+    response                TEXT CHECK (response IN ('confirmed', 'rejected')),
+    responded_at            TEXT,
+    -- 1 while the parent order is still pending_confirmation; flipped to 0
+    -- when the order ends for any reason so the partial unique index below
+    -- only covers currently open orders.
+    order_open              INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (order_id, student_id)
+);
+
+-- A student cannot belong to two open swap orders at the same time.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_pending_swap_student
+ON swap_participant(student_id)
+WHERE order_open = 1;
+
+CREATE INDEX IF NOT EXISTS idx_swap_participant_order
+ON swap_participant(order_id);
 """
 
 

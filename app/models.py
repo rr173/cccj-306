@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -116,3 +117,71 @@ class IssueIn(BaseModel):
 
 class ConfirmRevocationIn(BaseModel):
     issuer_school_id: str = Field(min_length=1, max_length=64)
+
+
+# ---------------------------------------------------------------------------
+# Advanced practical training: terms, classes, enrollments and joint swaps
+# ---------------------------------------------------------------------------
+
+
+class TrainingTermIn(BaseModel):
+    term_id: Optional[str] = Field(
+        default=None, min_length=1, max_length=64, pattern=ID_PATTERN
+    )
+    organizer_school_id: str = Field(min_length=1, max_length=64)
+    title: str = Field(min_length=1, max_length=200)
+    accepted_definition_ids: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _accepted_unique(self) -> "TrainingTermIn":
+        if len(set(self.accepted_definition_ids)) != len(self.accepted_definition_ids):
+            raise ValueError("accepted_definition_ids must not contain duplicates")
+        return self
+
+
+class TrainingClassIn(BaseModel):
+    class_id: Optional[str] = Field(
+        default=None, min_length=1, max_length=64, pattern=ID_PATTERN
+    )
+    term_id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=200)
+    capacity: int = Field(ge=0, le=1_000_000)
+
+
+class EnrollmentIn(BaseModel):
+    term_id: str = Field(min_length=1, max_length=64)
+    student_id: str = Field(min_length=1, max_length=64)
+    class_id: str = Field(min_length=1, max_length=64)
+    certificate_code: str = Field(min_length=1, max_length=64, pattern=ID_PATTERN)
+
+
+class WithdrawalIn(BaseModel):
+    term_id: str = Field(min_length=1, max_length=64)
+    student_id: str = Field(min_length=1, max_length=64)
+
+
+class SwapParticipantIn(BaseModel):
+    student_id: str = Field(min_length=1, max_length=64)
+    to_class_id: str = Field(min_length=1, max_length=64)
+
+
+class SwapOrderIn(BaseModel):
+    order_id: Optional[str] = Field(
+        default=None, min_length=1, max_length=64, pattern=ID_PATTERN
+    )
+    term_id: str = Field(min_length=1, max_length=64)
+    organizer_school_id: str = Field(min_length=1, max_length=64)
+    confirm_deadline: datetime
+    participants: list[SwapParticipantIn] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _participants_unique(self) -> "SwapOrderIn":
+        student_ids = [p.student_id for p in self.participants]
+        if len(set(student_ids)) != len(student_ids):
+            raise ValueError("each student may appear at most once in a swap order")
+        return self
+
+
+class SwapResponseIn(BaseModel):
+    student_id: str = Field(min_length=1, max_length=64)
+    response: Literal["confirmed", "rejected"]
