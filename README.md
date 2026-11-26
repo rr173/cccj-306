@@ -198,6 +198,10 @@ curl -sS -X POST \
   `uq_active_enrollment`（每期每生一个在册名额）与 `uq_pending_swap_student`（每生至多一张待确认单）
   是数据库层的最终防护；来源撤销在同一事务内联动释放报名名额并终止相关换班单，
   因此名册、单据与剩余名额始终可以用同一个先后顺序解释。
+- 器材的预约、改期、取消、领出、归还、停用与解除、标签变更都在 `BEGIN IMMEDIATE` 内完成：
+  优先级与整套判定只在该事务内计算一次，部分唯一索引 `uq_equipment_active_handover`
+  （`picked_up_at IS NOT NULL AND returned_at IS NULL` 时每件实物至多一条）是数据库层的
+  重复借出最终防护；预约的 `seq` 与领出的实际编号持久化在库内，重启后可继续沿原顺位判断。
 
 ## 进阶实训：报名与联合换班
 
@@ -265,6 +269,81 @@ python examples/demo_training_swap.py --db /tmp/training_demo.db
    该报名立即失效释放名额、整单变为 `disqualified`、其他人原班不动，释放名额可被新报名使用，
    迟到的确认无法再次调班。
 
+## 共享器材室：按班次整套预约与交接
+
+几所学校在同一实训场地共用一间器材室。器材按**实物编号**登记，由所属学校维护能力标签
+和停用时段；主办学校只能为自己名下的班次预约整套器材，现场一次领齐。
+
+### 领域规则
+
+- **实物与标签**
+  - 每件实物有全局唯一 `item_id`、所属学校 `owner_school_id` 和一组能力标签；
+  - 只有所属学校能改标签、加停用时段、提前解除停用；其他学校只能读取和预约；
+  - 停用时段为半开区间 `[start_at, end_at)`，可提前解除（`lifted_at`），解除后该段不再阻挡预约；
+  - 停用**不抹去**正在进行的借用：已领出的整套照常持有，直到实际归还。
+- **班次预约**
+  - 主办学校必须是该实训期 `training_term` 的 `organizer_school_id`，并为该期的一个班
+    `class_id` 提交开始、结束时间和一组需求；
+  - 每项需求写明所需**全部**标签及件数；一件实物必须同时带有该项的全部标签才算匹配；
+  - 同一次预约的各件必须是**不同实物**；从领出到约定结束，同一件不能靠中途更换来满足需求；
+  - 时间段含起点、不含终点。尚未领出的预约只考虑剩余时间 `[max(start, now), end)`，
+    不追补已经过去的用时。
+- **优先级与缺套**
+  - 各预约按首次受理的先后（`seq`）确定优先级；
+  - 当前不能全保时，第一个有完整可行安排的预约保留；随后每个预约只有在与已保留预约
+    **共同可行**时才保留。判断时可以为这些尚未领出的预约重排器材，不能因为此前恰好占用了
+    某一件就判缺；
+  - 新单无法整套保留则不受理（`409 reservation_not_feasible`），不写任何预约；
+  - 已受理但暂时无法保留的单状态仍为 `accepted`，对外显示 `feasible=false / short=true`（缺套），
+    但**不占器材**（`planned_item_ids=[]`），并给出 `shortage` 原因；
+  - 条件恢复（归还、解除停用、取消、改时间）后按原顺位自动恢复，不用重新下单。
+- **交接**
+  - 只有预约时间内（`start_at <= now < end_at`）且整套可保留时才能领出；
+  - 领出时一次登记实际交接的全部编号：数量须与需求总件数一致、编号互不相同、
+    每件都带对应需求项的全部标签且未处于停用段；
+  - 不能领出仍在别人手里的实物（`409 equipment_item_in_use`）；
+  - 领出后不再自动换件，按约定结束时间预计释放；到时仍未归还，
+    `expected_release_at=null`、`overdue=true`，不再为这件器材预计可用时间，直到实际归还；
+  - 已领出的一次整套归还，不能只归还一部分来维持借用。
+- **生命周期**
+  - 主办校可取消未领出的预约；未领且已到结束时间的预约在每次服务入口惰性过期；
+  - 取消、停用或解除、归还、改时间都会在同一事务内重新评估受影响预约。
+
+### HTTP 接口
+
+- 器材维护（所属学校）：
+  - `POST /api/equipment/items`
+  - `GET  /api/equipment/items?owner_school_id=...&tag=...`
+  - `GET  /api/equipment/items/{item_id}`
+  - `POST /api/equipment/items/{item_id}/tags`
+  - `POST /api/equipment/items/{item_id}/suspensions`
+  - `POST /api/equipment/items/{item_id}/suspensions/{suspension_id}/lift`
+- 预约与交接（主办学校）：
+  - `POST /api/equipment/reservations`
+  - `GET  /api/equipment/reservations?organizer_school_id=...&term_id=...&status=...`
+  - `GET  /api/equipment/reservations/{reservation_id}`
+  - `POST /api/equipment/reservations/{reservation_id}/reschedule`
+  - `POST /api/equipment/reservations/{reservation_id}/cancel`
+  - `POST /api/equipment/reservations/{reservation_id}/pickup`
+  - `POST /api/equipment/reservations/{reservation_id}/return`
+  - `GET  /api/equipment/schools/{school_id}/board`（本校单据状态与当前已领编号）
+
+预约状态：`accepted`（含缺套）、`picked_up`、`returned`、`cancelled`、`expired`。
+
+### 可复跑示例
+
+```bash
+python examples/demo_equipment_room.py --db /tmp/equipment_demo.db
+```
+
+脚本断言并打印两条时间线：
+
+1. **停用后重排仍能领齐**：属校停用一台投影仪（覆盖班次时段），主办校的整套预约
+   重排到同标签的另一台投影仪与独立 HDMI 线，进窗后一次登记全部编号领齐。
+2. **逾期导致另一单暂缺、归还后恢复**：前一班领走最后一台相机后逾期未还，
+   后一班不再预计释放时间且暂缺、不占器材；新单因无法整套保留而不受理；
+   实际归还后后一班按原顺位恢复完整计划并在剩余时间内领出。
+
 ## 测试
 
 ```bash
@@ -285,4 +364,8 @@ pytest
 - 满班两人互换、三人联合轮换的整体预留与一次性换班；
 - 拒绝、退出、撤销、超时四种结束方式均释放预留且不部分换班；
 - 迟到/重复确认不能再次调班；重启后未到期单可继续确认、过期单不再阻名额；
-- 并发报名不超额、并发换班单不能让同一学生同时占两张单。
+- 并发报名不超额、并发换班单不能让同一学生同时占两张单；
+- 器材：每项需求需全部标签且一次预约不重复用同一实物；停用后整套重排仍可领齐；
+  解除停用按原顺位恢复；逾期未还不预计释放时间且后单暂缺，归还后恢复；
+  取消/过期/改时间反映到受影响预约；并发交接同一实物恰好成功一次；
+  重启后已受理顺位与实际交接编号不丢。

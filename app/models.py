@@ -185,3 +185,132 @@ class SwapOrderIn(BaseModel):
 class SwapResponseIn(BaseModel):
     student_id: str = Field(min_length=1, max_length=64)
     response: Literal["confirmed", "rejected"]
+
+
+# ---------------------------------------------------------------------------
+# Shared equipment room: physical items and class reservations
+# ---------------------------------------------------------------------------
+
+class EquipmentItemIn(BaseModel):
+    item_id: str = Field(min_length=1, max_length=64, pattern=ID_PATTERN)
+    owner_school_id: str = Field(min_length=1, max_length=64)
+    name: Optional[str] = Field(default=None, max_length=200)
+    tags: list[str] = Field(min_length=1)
+
+    @field_validator("tags")
+    @classmethod
+    def _tags_normalized(cls, values: list[str]) -> list[str]:
+        normalized = []
+        for value in values:
+            tag = value.strip()
+            if not tag:
+                raise ValueError("equipment tag cannot be empty")
+            if len(tag) > 64:
+                raise ValueError("equipment tag is too long")
+            if tag not in normalized:
+                normalized.append(tag)
+        if not normalized:
+            raise ValueError("tags must not be empty")
+        return normalized
+
+
+class EquipmentTagsIn(BaseModel):
+    owner_school_id: str = Field(min_length=1, max_length=64)
+    tags: list[str] = Field(min_length=1)
+
+    @field_validator("tags")
+    @classmethod
+    def _tags_unique(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not tag for tag in normalized):
+            raise ValueError("equipment tag cannot be empty")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("tags must be distinct")
+        return normalized
+
+
+class EquipmentSuspensionIn(BaseModel):
+    owner_school_id: str = Field(min_length=1, max_length=64)
+    start_at: datetime
+    end_at: datetime
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def _window_ordered(self) -> "EquipmentSuspensionIn":
+        if self.end_at <= self.start_at:
+            raise ValueError("end_at must be after start_at")
+        return self
+
+
+class EquipmentLiftIn(BaseModel):
+    owner_school_id: str = Field(min_length=1, max_length=64)
+
+
+class EquipmentRequirementIn(BaseModel):
+    tags: list[str] = Field(min_length=1)
+    count: int = Field(ge=1, le=1_000_000)
+
+    @field_validator("tags")
+    @classmethod
+    def _tags_normalized(cls, values: list[str]) -> list[str]:
+        normalized = []
+        for value in values:
+            tag = value.strip()
+            if not tag:
+                raise ValueError("requirement tag cannot be empty")
+            if len(tag) > 64:
+                raise ValueError("requirement tag is too long")
+            if tag not in normalized:
+                normalized.append(tag)
+        if not normalized:
+            raise ValueError("a requirement needs at least one tag")
+        return normalized
+
+
+class EquipmentReservationIn(BaseModel):
+    reservation_id: Optional[str] = Field(
+        default=None, min_length=1, max_length=64, pattern=ID_PATTERN
+    )
+    organizer_school_id: str = Field(min_length=1, max_length=64)
+    term_id: str = Field(min_length=1, max_length=64)
+    class_id: str = Field(min_length=1, max_length=64)
+    start_at: datetime
+    end_at: datetime
+    requirements: list[EquipmentRequirementIn] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _window_ordered(self) -> "EquipmentReservationIn":
+        if self.end_at <= self.start_at:
+            raise ValueError("end_at must be after start_at")
+        return self
+
+
+class EquipmentCancelIn(BaseModel):
+    organizer_school_id: str = Field(min_length=1, max_length=64)
+
+
+class EquipmentPickupIn(BaseModel):
+    organizer_school_id: str = Field(min_length=1, max_length=64)
+    item_ids: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _item_ids_unique(self) -> "EquipmentPickupIn":
+        if len(set(self.item_ids)) != len(self.item_ids):
+            raise ValueError("item_ids must be distinct; one physical item cannot fill two slots")
+        return self
+
+
+class EquipmentReturnIn(BaseModel):
+    organizer_school_id: str = Field(min_length=1, max_length=64)
+
+
+class EquipmentRescheduleIn(BaseModel):
+    organizer_school_id: str = Field(min_length=1, max_length=64)
+    start_at: datetime
+    end_at: datetime
+
+    @model_validator(mode="after")
+    def _window_ordered(self) -> "EquipmentRescheduleIn":
+        if self.end_at <= self.start_at:
+            raise ValueError("end_at must be after start_at")
+        return self

@@ -9,10 +9,19 @@ from typing import Optional
 from fastapi import APIRouter, Depends, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
-from . import services, training
+from . import equipment, services, training
 from .db import connect, init_db
 from .models import (
     ConfirmRevocationIn,
+    EquipmentCancelIn,
+    EquipmentItemIn,
+    EquipmentLiftIn,
+    EquipmentPickupIn,
+    EquipmentReservationIn,
+    EquipmentRescheduleIn,
+    EquipmentReturnIn,
+    EquipmentSuspensionIn,
+    EquipmentTagsIn,
     DefinitionIn,
     EnrollmentIn,
     IssueIn,
@@ -292,6 +301,134 @@ def create_app(db_path: Optional[str] = None) -> FastAPI:
         )
 
     app.include_router(training_router)
+
+    # ----- shared equipment room ------------------------------------------
+
+    equipment_router = APIRouter(prefix="/api/equipment", tags=["equipment"])
+
+    @equipment_router.post("/items", status_code=201)
+    def create_equipment_item(
+        payload: EquipmentItemIn, conn: sqlite3.Connection = DbConn
+    ):
+        return equipment.create_item(conn, payload)
+
+    @equipment_router.get("/items")
+    def list_equipment_items(
+        owner_school_id: Optional[str] = None,
+        tag: Optional[str] = None,
+        conn: sqlite3.Connection = DbConn,
+    ):
+        return equipment.list_items(conn, owner_school_id=owner_school_id, tag=tag)
+
+    @equipment_router.get("/items/{item_id}")
+    def get_equipment_item(item_id: str, conn: sqlite3.Connection = DbConn):
+        return equipment.get_item(conn, item_id)
+
+    @equipment_router.post("/items/{item_id}/tags")
+    def set_equipment_item_tags(
+        item_id: str, payload: EquipmentTagsIn, conn: sqlite3.Connection = DbConn
+    ):
+        return equipment.set_item_tags(conn, item_id, payload)
+
+    @equipment_router.post("/items/{item_id}/suspensions", status_code=201)
+    def suspend_equipment_item(
+        item_id: str, payload: EquipmentSuspensionIn, conn: sqlite3.Connection = DbConn
+    ):
+        return equipment.add_suspension(conn, item_id, payload)
+
+    @equipment_router.post(
+        "/items/{item_id}/suspensions/{suspension_id}/lift"
+    )
+    def lift_equipment_suspension(
+        item_id: str,
+        suspension_id: int,
+        payload: EquipmentLiftIn,
+        conn: sqlite3.Connection = DbConn,
+    ):
+        return equipment.lift_suspension(
+            conn, item_id, suspension_id, payload.owner_school_id
+        )
+
+    @equipment_router.post("/reservations", status_code=201)
+    def create_equipment_reservation(
+        payload: EquipmentReservationIn, conn: sqlite3.Connection = DbConn
+    ):
+        return equipment.create_reservation(conn, payload)
+
+    @equipment_router.get("/reservations")
+    def list_equipment_reservations(
+        organizer_school_id: Optional[str] = None,
+        term_id: Optional[str] = None,
+        status: Optional[str] = Query(
+            default=None,
+            description="accepted | picked_up | returned | cancelled | expired",
+        ),
+        conn: sqlite3.Connection = DbConn,
+    ):
+        return equipment.list_reservations(
+            conn,
+            organizer_school_id=organizer_school_id,
+            term_id=term_id,
+            status=status,
+        )
+
+    @equipment_router.get("/reservations/{reservation_id}")
+    def get_equipment_reservation(
+        reservation_id: str,
+        organizer_school_id: Optional[str] = None,
+        conn: sqlite3.Connection = DbConn,
+    ):
+        return equipment.get_reservation(
+            conn, reservation_id, organizer_school_id=organizer_school_id
+        )
+
+    @equipment_router.post("/reservations/{reservation_id}/reschedule")
+    def reschedule_equipment_reservation(
+        reservation_id: str,
+        payload: EquipmentRescheduleIn,
+        conn: sqlite3.Connection = DbConn,
+    ):
+        return equipment.reschedule_reservation(
+            conn,
+            reservation_id,
+            payload.organizer_school_id,
+            payload.start_at,
+            payload.end_at,
+        )
+
+    @equipment_router.post("/reservations/{reservation_id}/cancel")
+    def cancel_equipment_reservation(
+        reservation_id: str,
+        payload: EquipmentCancelIn,
+        conn: sqlite3.Connection = DbConn,
+    ):
+        return equipment.cancel_reservation(
+            conn, reservation_id, payload.organizer_school_id
+        )
+
+    @equipment_router.post("/reservations/{reservation_id}/pickup")
+    def pickup_equipment_reservation(
+        reservation_id: str,
+        payload: EquipmentPickupIn,
+        conn: sqlite3.Connection = DbConn,
+    ):
+        return equipment.pickup(conn, reservation_id, payload)
+
+    @equipment_router.post("/reservations/{reservation_id}/return")
+    def return_equipment_reservation(
+        reservation_id: str,
+        payload: EquipmentReturnIn,
+        conn: sqlite3.Connection = DbConn,
+    ):
+        return equipment.return_items(
+            conn, reservation_id, payload.organizer_school_id
+        )
+
+    @equipment_router.get("/schools/{school_id}/board")
+    def equipment_school_board(school_id: str, conn: sqlite3.Connection = DbConn):
+        return equipment.school_board(conn, school_id)
+
+    app.include_router(equipment_router)
 
     # Public verification is intentionally not under an administrative noun.
     @app.get("/verify/{certificate_code}", tags=["verification"])

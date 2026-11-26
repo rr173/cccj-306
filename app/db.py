@@ -233,6 +233,113 @@ WHERE order_open = 1;
 
 CREATE INDEX IF NOT EXISTS idx_swap_participant_order
 ON swap_participant(order_id);
+
+-- ---------------------------------------------------------------------------
+-- Shared equipment room: physical items, suspensions, class reservations
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS equipment_item (
+    item_id             TEXT PRIMARY KEY,
+    owner_school_id     TEXT NOT NULL REFERENCES school(school_id),
+    name                TEXT,
+    created_at          TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_equipment_item_owner
+ON equipment_item(owner_school_id);
+
+CREATE TABLE IF NOT EXISTS equipment_item_tag (
+    item_id             TEXT NOT NULL REFERENCES equipment_item(item_id),
+    tag                 TEXT NOT NULL,
+    PRIMARY KEY (item_id, tag)
+);
+
+CREATE TABLE IF NOT EXISTS equipment_suspension (
+    suspension_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id             TEXT NOT NULL REFERENCES equipment_item(item_id),
+    owner_school_id     TEXT NOT NULL REFERENCES school(school_id),
+    start_at            TEXT NOT NULL,
+    end_at              TEXT NOT NULL,
+    reason              TEXT,
+    created_at          TEXT NOT NULL,
+    lifted_at           TEXT,
+    CHECK (start_at < end_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_equipment_suspension_item
+ON equipment_suspension(item_id);
+
+CREATE TABLE IF NOT EXISTS equipment_reservation (
+    seq                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    reservation_id          TEXT NOT NULL UNIQUE,
+    organizer_school_id     TEXT NOT NULL REFERENCES school(school_id),
+    term_id                 TEXT NOT NULL REFERENCES training_term(term_id),
+    class_id                TEXT NOT NULL REFERENCES training_class(class_id),
+    start_at                TEXT NOT NULL,
+    end_at                  TEXT NOT NULL,
+    status                  TEXT NOT NULL CHECK (
+                                status IN (
+                                    'accepted',
+                                    'picked_up',
+                                    'returned',
+                                    'cancelled',
+                                    'expired'
+                                )
+                            ),
+    created_at              TEXT NOT NULL,
+    accepted_at             TEXT NOT NULL,
+    picked_up_at            TEXT,
+    returned_at             TEXT,
+    cancelled_at            TEXT,
+    ended_at                TEXT,
+    CHECK (start_at < end_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_equipment_reservation_organizer
+ON equipment_reservation(organizer_school_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_equipment_reservation_class
+ON equipment_reservation(term_id, class_id);
+
+CREATE TABLE IF NOT EXISTS equipment_reservation_requirement (
+    requirement_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    reservation_id      TEXT NOT NULL REFERENCES equipment_reservation(reservation_id),
+    position            INTEGER NOT NULL,
+    count               INTEGER NOT NULL CHECK (count >= 1),
+    UNIQUE (reservation_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS equipment_requirement_tag (
+    requirement_id      INTEGER NOT NULL
+                        REFERENCES equipment_reservation_requirement(requirement_id),
+    tag                 TEXT NOT NULL,
+    PRIMARY KEY (requirement_id, tag)
+);
+
+CREATE TABLE IF NOT EXISTS equipment_allocation (
+    allocation_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    reservation_id      TEXT NOT NULL REFERENCES equipment_reservation(reservation_id),
+    requirement_id      INTEGER NOT NULL
+                        REFERENCES equipment_reservation_requirement(requirement_id),
+    item_id             TEXT NOT NULL REFERENCES equipment_item(item_id),
+    planned_at          TEXT NOT NULL,
+    picked_up_at        TEXT,
+    returned_at         TEXT,
+    UNIQUE (reservation_id, item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_equipment_allocation_item
+ON equipment_allocation(item_id);
+
+CREATE INDEX IF NOT EXISTS idx_equipment_allocation_reservation
+ON equipment_allocation(reservation_id);
+
+-- At most one unreleased physical handover of an item may exist at any time.
+-- Planned (not yet handed over) rows may be shared by non-overlapping bookings;
+-- this index is the database-level guard against double lending.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_equipment_active_handover
+ON equipment_allocation(item_id)
+WHERE picked_up_at IS NOT NULL AND returned_at IS NULL;
 """
 
 
