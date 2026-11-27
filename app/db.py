@@ -340,6 +340,148 @@ ON equipment_allocation(reservation_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_equipment_active_handover
 ON equipment_allocation(item_id)
 WHERE picked_up_at IS NOT NULL AND returned_at IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- Cross-school reconciliation: share rosters, advanced repair expenses,
+-- statement rounds, transfer orders and offline receipts
+-- ---------------------------------------------------------------------------
+
+-- Per-term share roster registered by the organizing school. Frozen as soon
+-- as the first expense is reported for the term.
+CREATE TABLE IF NOT EXISTS share_roster (
+    term_id     TEXT NOT NULL REFERENCES training_term(term_id),
+    school_id   TEXT NOT NULL REFERENCES school(school_id),
+    share       INTEGER NOT NULL CHECK (share >= 1),
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (term_id, school_id)
+);
+
+-- One advanced expense per borrowed physical item per borrowing (reservation).
+CREATE TABLE IF NOT EXISTS shared_expense (
+    expense_id          TEXT PRIMARY KEY,
+    term_id             TEXT NOT NULL REFERENCES training_term(term_id),
+    reservation_id      TEXT NOT NULL REFERENCES equipment_reservation(reservation_id),
+    item_id             TEXT NOT NULL REFERENCES equipment_item(item_id),
+    advancing_school_id TEXT NOT NULL REFERENCES school(school_id),
+    created_at          TEXT NOT NULL,
+    UNIQUE (reservation_id, item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_shared_expense_term
+ON shared_expense(term_id);
+
+-- Every expense is a chain of versions: the original claim plus corrections.
+-- A version takes effect only once the organizer approves it, and is booked
+-- into a statement round at close time (round_no stays NULL until then).
+CREATE TABLE IF NOT EXISTS expense_version (
+    version_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    expense_id       TEXT NOT NULL REFERENCES shared_expense(expense_id),
+    version_no       INTEGER NOT NULL,
+    kind             TEXT NOT NULL CHECK (kind IN ('original', 'correction')),
+    amount_cents     INTEGER NOT NULL CHECK (amount_cents >= 0),
+    replaces_version INTEGER,
+    status           TEXT NOT NULL CHECK (status IN ('pending', 'approved')),
+    submitted_by     TEXT NOT NULL REFERENCES school(school_id),
+    submitted_at     TEXT NOT NULL,
+    approved_by      TEXT REFERENCES school(school_id),
+    approved_at      TEXT,
+    round_no         INTEGER,
+    UNIQUE (expense_id, version_no)
+);
+
+CREATE INDEX IF NOT EXISTS idx_expense_version_expense
+ON expense_version(expense_id);
+
+-- Full per-school allocation of one expense version (largest-remainder split
+-- of amount_cents across the frozen roster). Corrections are booked later as
+-- the delta between two versions' full allocations.
+CREATE TABLE IF NOT EXISTS expense_allocation (
+    version_id  INTEGER NOT NULL REFERENCES expense_version(version_id),
+    school_id   TEXT NOT NULL REFERENCES school(school_id),
+    amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
+    PRIMARY KEY (version_id, school_id)
+);
+
+-- One closed statement round per (term, round_no). Rows are immutable once
+-- written; closing the same round again simply returns the stored statement.
+CREATE TABLE IF NOT EXISTS statement (
+    term_id     TEXT NOT NULL REFERENCES training_term(term_id),
+    round_no    INTEGER NOT NULL CHECK (round_no >= 1),
+    closed_by   TEXT NOT NULL REFERENCES school(school_id),
+    closed_at   TEXT NOT NULL,
+    PRIMARY KEY (term_id, round_no)
+);
+
+CREATE TABLE IF NOT EXISTS statement_line (
+    term_id     TEXT NOT NULL,
+    round_no    INTEGER NOT NULL,
+    expense_id  TEXT NOT NULL REFERENCES shared_expense(expense_id),
+    version_no  INTEGER NOT NULL,
+    kind        TEXT NOT NULL CHECK (kind IN ('original', 'correction')),
+    PRIMARY KEY (term_id, round_no, expense_id, version_no),
+    FOREIGN KEY (term_id, round_no) REFERENCES statement(term_id, round_no)
+);
+
+-- Booked delta per school for one statement line (full allocation for an
+-- original claim, new-minus-old allocation for a correction; may be <= 0).
+CREATE TABLE IF NOT EXISTS statement_line_allocation (
+    term_id     TEXT NOT NULL,
+    round_no    INTEGER NOT NULL,
+    expense_id  TEXT NOT NULL,
+    version_no  INTEGER NOT NULL,
+    school_id   TEXT NOT NULL REFERENCES school(school_id),
+    delta_cents INTEGER NOT NULL,
+    PRIMARY KEY (term_id, round_no, expense_id, version_no, school_id),
+    FOREIGN KEY (term_id, round_no, expense_id, version_no)
+        REFERENCES statement_line(term_id, round_no, expense_id, version_no)
+);
+
+-- Point-in-time snapshot of one school pair taken at close time. school_a is
+-- the lexicographically smaller school id; amounts suffixed _a_to_b describe
+-- that direction. net_a_to_b > 0 means school_a owed school_b at close time.
+CREATE TABLE IF NOT EXISTS statement_pair (
+    term_id         TEXT NOT NULL,
+    round_no        INTEGER NOT NULL,
+    school_a        TEXT NOT NULL REFERENCES school(school_id),
+    school_b        TEXT NOT NULL REFERENCES school(school_id),
+    charges_a_to_b  INTEGER NOT NULL,
+    charges_b_to_a  INTEGER NOT NULL,
+    received_a_to_b INTEGER NOT NULL,
+    received_b_to_a INTEGER NOT NULL,
+    inflight_a_to_b INTEGER NOT NULL,
+    inflight_b_to_a INTEGER NOT NULL,
+    net_a_to_b      INTEGER NOT NULL,
+    PRIMARY KEY (term_id, round_no, school_a, school_b),
+    FOREIGN KEY (term_id, round_no) REFERENCES statement(term_id, round_no)
+);
+
+-- A transfer order registered by the paying school. The payee records offline
+-- receipts against it and finally confirms no more money will arrive, which
+-- releases the still-outstanding part from the in-flight totals.
+CREATE TABLE IF NOT EXISTS transfer_order (
+    transfer_id     TEXT PRIMARY KEY,
+    term_id         TEXT NOT NULL REFERENCES training_term(term_id),
+    payer_school_id TEXT NOT NULL REFERENCES school(school_id),
+    payee_school_id TEXT NOT NULL REFERENCES school(school_id),
+    amount_cents    INTEGER NOT NULL CHECK (amount_cents > 0),
+    status          TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+    created_at      TEXT NOT NULL,
+    closed_at       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_transfer_order_term
+ON transfer_order(term_id, status);
+
+CREATE TABLE IF NOT EXISTS transfer_receipt (
+    receipt_id  TEXT PRIMARY KEY,
+    transfer_id TEXT NOT NULL REFERENCES transfer_order(transfer_id),
+    amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+    recorded_by TEXT NOT NULL REFERENCES school(school_id),
+    received_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_transfer_receipt_transfer
+ON transfer_receipt(transfer_id);
 """
 
 

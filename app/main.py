@@ -6,10 +6,10 @@ import os
 import sqlite3
 from typing import Optional
 
-from fastapi import APIRouter, Depends, FastAPI, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response
 from fastapi.responses import JSONResponse
 
-from . import equipment, services, training
+from . import equipment, services, settlement, training
 from .db import connect, init_db
 from .models import (
     ConfirmRevocationIn,
@@ -24,16 +24,24 @@ from .models import (
     EquipmentTagsIn,
     DefinitionIn,
     EnrollmentIn,
+    ExpenseCorrectionIn,
+    ExpenseIn,
     IssueIn,
+    ReceiptIn,
     RecordIn,
     ReviewIn,
     RevocationIn,
     SchoolIn,
+    ShareRosterIn,
+    StatementCloseIn,
     StudentIn,
     SwapOrderIn,
     SwapResponseIn,
     TrainingClassIn,
     TrainingTermIn,
+    TransferCloseIn,
+    TransferIn,
+    VersionApproveIn,
     WithdrawalIn,
 )
 from .services import ServiceError
@@ -429,6 +437,142 @@ def create_app(db_path: Optional[str] = None) -> FastAPI:
         return equipment.school_board(conn, school_id)
 
     app.include_router(equipment_router)
+
+    # ----- cross-school reconciliation ------------------------------------
+
+    settlement_router = APIRouter(prefix="/api/settlement", tags=["settlement"])
+
+    @settlement_router.put("/terms/{term_id}/roster")
+    def set_share_roster(
+        term_id: str, payload: ShareRosterIn, conn: sqlite3.Connection = DbConn
+    ):
+        return settlement.set_roster(conn, term_id, payload)
+
+    @settlement_router.get("/terms/{term_id}/roster")
+    def get_share_roster(term_id: str, conn: sqlite3.Connection = DbConn):
+        return settlement.get_roster(conn, term_id)
+
+    @settlement_router.post("/terms/{term_id}/expenses", status_code=201)
+    def create_shared_expense(
+        term_id: str, payload: ExpenseIn, conn: sqlite3.Connection = DbConn
+    ):
+        return settlement.create_expense(conn, term_id, payload)
+
+    @settlement_router.get("/terms/{term_id}/expenses")
+    def list_shared_expenses(
+        term_id: str,
+        advancing_school_id: Optional[str] = None,
+        conn: sqlite3.Connection = DbConn,
+    ):
+        return settlement.list_expenses(
+            conn, term_id, advancing_school_id=advancing_school_id
+        )
+
+    @settlement_router.get("/expenses/{expense_id}")
+    def get_shared_expense(expense_id: str, conn: sqlite3.Connection = DbConn):
+        return settlement.get_expense(conn, expense_id)
+
+    @settlement_router.post("/expenses/{expense_id}/corrections", status_code=201)
+    def create_expense_correction(
+        expense_id: str,
+        payload: ExpenseCorrectionIn,
+        conn: sqlite3.Connection = DbConn,
+    ):
+        return settlement.create_correction(conn, expense_id, payload)
+
+    @settlement_router.post("/expenses/{expense_id}/versions/{version_no}/approve")
+    def approve_expense_version(
+        expense_id: str,
+        version_no: int,
+        payload: VersionApproveIn,
+        conn: sqlite3.Connection = DbConn,
+    ):
+        return settlement.approve_version(
+            conn, expense_id, version_no, payload.organizer_school_id
+        )
+
+    @settlement_router.post("/terms/{term_id}/close", status_code=201)
+    def close_statement_round(
+        term_id: str,
+        payload: StatementCloseIn,
+        response: Response,
+        conn: sqlite3.Connection = DbConn,
+    ):
+        result, created = settlement.close_round(conn, term_id, payload)
+        if not created:
+            response.status_code = 200
+        return result
+
+    @settlement_router.get("/terms/{term_id}/statements")
+    def list_statements(term_id: str, conn: sqlite3.Connection = DbConn):
+        return settlement.list_statements(conn, term_id)
+
+    @settlement_router.get("/terms/{term_id}/statements/{round_no}")
+    def get_statement(term_id: str, round_no: int, conn: sqlite3.Connection = DbConn):
+        return settlement.get_statement(conn, term_id, round_no)
+
+    @settlement_router.post("/terms/{term_id}/transfers", status_code=201)
+    def create_transfer(
+        term_id: str,
+        payload: TransferIn,
+        response: Response,
+        conn: sqlite3.Connection = DbConn,
+    ):
+        result, created = settlement.create_transfer(conn, term_id, payload)
+        if not created:
+            response.status_code = 200
+        return result
+
+    @settlement_router.get("/terms/{term_id}/transfers")
+    def list_transfers(
+        term_id: str,
+        school_id: Optional[str] = Query(
+            default=None, description="only transfers where this school pays or receives"
+        ),
+        conn: sqlite3.Connection = DbConn,
+    ):
+        return settlement.list_transfers(conn, term_id, school_id=school_id)
+
+    @settlement_router.get("/transfers/{transfer_id}")
+    def get_transfer(transfer_id: str, conn: sqlite3.Connection = DbConn):
+        return settlement.get_transfer(conn, transfer_id)
+
+    @settlement_router.post("/transfers/{transfer_id}/receipts", status_code=201)
+    def create_receipt(
+        transfer_id: str,
+        payload: ReceiptIn,
+        response: Response,
+        conn: sqlite3.Connection = DbConn,
+    ):
+        result, created = settlement.create_receipt(conn, transfer_id, payload)
+        if not created:
+            response.status_code = 200
+        return result
+
+    @settlement_router.post("/transfers/{transfer_id}/close")
+    def close_transfer(
+        transfer_id: str,
+        payload: TransferCloseIn,
+        conn: sqlite3.Connection = DbConn,
+    ):
+        return settlement.close_transfer(conn, transfer_id, payload.payee_school_id)
+
+    @settlement_router.get("/terms/{term_id}/payable")
+    def get_payable(
+        term_id: str,
+        payer_school_id: str = Query(...),
+        payee_school_id: str = Query(...),
+        conn: sqlite3.Connection = DbConn,
+    ):
+        return settlement.get_payable(conn, term_id, payer_school_id, payee_school_id)
+
+    @settlement_router.get("/terms/{term_id}/schools/{school_id}/balances")
+    def get_school_balances(
+        term_id: str, school_id: str, conn: sqlite3.Connection = DbConn
+    ):
+        return settlement.get_school_balances(conn, term_id, school_id)
+
+    app.include_router(settlement_router)
 
     # Public verification is intentionally not under an administrative noun.
     @app.get("/verify/{certificate_code}", tags=["verification"])

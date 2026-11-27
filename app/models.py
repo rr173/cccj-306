@@ -314,3 +314,77 @@ class EquipmentRescheduleIn(BaseModel):
         if self.end_at <= self.start_at:
             raise ValueError("end_at must be after start_at")
         return self
+
+
+# ---------------------------------------------------------------------------
+# Cross-school reconciliation: share rosters, expenses, statements, transfers
+# ---------------------------------------------------------------------------
+
+# Money is always counted in integer cents; the cap keeps share arithmetic
+# (amount * share) far below SQLite's 64-bit integer limit.
+MAX_AMOUNT_CENTS = 1_000_000_000_000
+
+
+class ShareEntryIn(BaseModel):
+    school_id: str = Field(min_length=1, max_length=64)
+    share: int = Field(ge=1, le=1_000_000)
+
+
+class ShareRosterIn(BaseModel):
+    organizer_school_id: str = Field(min_length=1, max_length=64)
+    shares: list[ShareEntryIn] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _schools_unique(self) -> "ShareRosterIn":
+        school_ids = [entry.school_id for entry in self.shares]
+        if len(set(school_ids)) != len(school_ids):
+            raise ValueError("shares must not repeat a school")
+        return self
+
+
+class ExpenseIn(BaseModel):
+    expense_id: Optional[str] = Field(
+        default=None, min_length=1, max_length=64, pattern=ID_PATTERN
+    )
+    advancing_school_id: str = Field(min_length=1, max_length=64)
+    reservation_id: str = Field(min_length=1, max_length=64)
+    item_id: str = Field(min_length=1, max_length=64)
+    amount_cents: int = Field(ge=1, le=MAX_AMOUNT_CENTS)
+
+
+class ExpenseCorrectionIn(BaseModel):
+    advancing_school_id: str = Field(min_length=1, max_length=64)
+    replaces_version: int = Field(ge=1)
+    new_amount_cents: int = Field(ge=0, le=MAX_AMOUNT_CENTS)
+
+
+class VersionApproveIn(BaseModel):
+    organizer_school_id: str = Field(min_length=1, max_length=64)
+
+
+class StatementCloseIn(BaseModel):
+    organizer_school_id: str = Field(min_length=1, max_length=64)
+    round_no: int = Field(ge=1)
+
+
+class TransferIn(BaseModel):
+    transfer_id: str = Field(min_length=1, max_length=64, pattern=ID_PATTERN)
+    payer_school_id: str = Field(min_length=1, max_length=64)
+    payee_school_id: str = Field(min_length=1, max_length=64)
+    amount_cents: int = Field(ge=1, le=MAX_AMOUNT_CENTS)
+
+    @model_validator(mode="after")
+    def _payer_differs_from_payee(self) -> "TransferIn":
+        if self.payer_school_id == self.payee_school_id:
+            raise ValueError("payer_school_id and payee_school_id must differ")
+        return self
+
+
+class ReceiptIn(BaseModel):
+    receipt_id: str = Field(min_length=1, max_length=64, pattern=ID_PATTERN)
+    payee_school_id: str = Field(min_length=1, max_length=64)
+    amount_cents: int = Field(ge=1, le=MAX_AMOUNT_CENTS)
+
+
+class TransferCloseIn(BaseModel):
+    payee_school_id: str = Field(min_length=1, max_length=64)
